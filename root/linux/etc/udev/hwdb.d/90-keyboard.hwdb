@@ -1,25 +1,54 @@
-# The Linux keycodes are defined in:
-#   /usr/include/linux/input-event-codes.h
+# Swap Escape with Caps Lock and left Alt with left Super in the kernel
+# keymap, so the swap works on the console, X11, and Wayland without XKB or
+# kanata. Ergonomic keyboards remap in their firmware and keep the defaults.
 #
-# The format of each line in the block body is:
-#   KEYBOARD_KEY_<scancode>=<keycode>.
+# Each record is one or more match lines, then indented lines of the form:
+#   KEYBOARD_KEY_<scancode>=<keycode>
+# <scancode> is hexadecimal without the leading 0x, and <keycode> is the
+# lowercase name of a KEY_* constant in /usr/include/linux/input-event-codes.h.
+# Find a key's scancode with evtest(1): the MSC_SCAN value of a key press.
 #
-# The value of <scancode> is hexadecimal, but without the leading 0x
-# (i.e. specify a0 instead of 0xa0), whereas the value of <keycode> is the
-# lower-case keycode name string as listed in:
-#   /usr/include/linux/input-event-codes.h
+# When several records match a keyboard, a key set in a later record wins.
 #
-# See the KEY_<KEYCODE> variables), a sorted list is available at:
-#       https://hal.freedesktop.org/quirk/quirk-keymap-list.txt
-#
-# It is not possible to specify decimal value in <keycode>
-#
+# Apply after editing:
+#   Arch (systemd):  systemd-hwdb update
+#   Void (eudev):    udevadm hwdb --update
+#   Then:            udevadm trigger --sysname-match="event*"
+# Check a keyboard (its modalias is in /sys/class/input/eventN/device/modalias):
+#   systemd-hwdb query "evdev:<modalias>"
 
-# Remap common keys for all AT keyboards (i.e. Laptops)
+# Built-in laptop keyboards (AT keyboard driver)
 evdev:atkbd:*
- KEYBOARD_KEY_01=capslock       #   1 Escape        => CapsLock
- KEYBOARD_KEY_3a=esc            #  58 CapsLock      => Escape
- KEYBOARD_KEY_7d=leftalt        # 125 Left-Meta     => Left-Alt
- KEYBOARD_KEY_38=leftmeta       #  56 Left-Alt      => Left-Meta
- KEYBOARD_KEY_61=rightctrl      #  97 Right-Ctrl    => Right-Alt
- KEYBOARD_KEY_64=rightalt       # 100 Right-Alt     => Right-Ctrl
+ KEYBOARD_KEY_01=capslock   # Escape     => Caps Lock
+ KEYBOARD_KEY_3a=esc        # Caps Lock  => Escape
+ KEYBOARD_KEY_38=leftmeta   # Left Alt   => Left Super
+ KEYBOARD_KEY_db=leftalt    # Left Super => Left Alt
+
+# USB (b0003) and Bluetooth (b0005) keyboards: HID usage scancodes
+evdev:input:b0003*
+evdev:input:b0005*
+ KEYBOARD_KEY_70029=capslock  # Escape     => Caps Lock
+ KEYBOARD_KEY_70039=esc       # Caps Lock  => Escape
+ KEYBOARD_KEY_700e2=leftmeta  # Left Alt   => Left Super
+ KEYBOARD_KEY_700e3=leftalt   # Left Super => Left Alt
+
+# Ergonomic keyboards: restore the default keys. This record must stay after
+# the one above, so it wins.
+#
+# To add a keyboard, plug it in (or connect it over Bluetooth) and read its
+# modalias, e.g. input:b0003v3297p4976e0111-e0,1,4,...:
+#   grep -l Kinesis /sys/class/input/event*/device/name
+#   cat /sys/class/input/eventN/device/modalias
+# Add a match line with its bus, vendor, and product, keeping the uppercase
+# hex digits as written in the modalias:
+#   evdev:input:b0003v<VENDOR>p<PRODUCT>*   USB
+#   evdev:input:b0005v<VENDOR>p<PRODUCT>*   Bluetooth (IDs can differ from USB)
+# A vendor alone (evdev:input:b0003v<VENDOR>*) covers all of its keyboards,
+# so use it only for vendors that make ergonomic keyboards only.
+#
+# ZSA (ErgoDox EZ, Moonlander, Voyager): vendor 3297
+evdev:input:b0003v3297*
+ KEYBOARD_KEY_70029=esc
+ KEYBOARD_KEY_70039=capslock
+ KEYBOARD_KEY_700e2=leftalt
+ KEYBOARD_KEY_700e3=leftmeta
