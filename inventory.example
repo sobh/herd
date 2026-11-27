@@ -1,0 +1,10 @@
+# herd inventory: one host per line, DESTINATION FORM_FACTOR.
+# DESTINATION is anything ssh accepts: user@host, host, or a Host alias from
+# ~/.ssh/config. FORM_FACTOR is desktop, laptop, or server.
+#
+# Copy to ~/.config/herd/inventory, or pass it with: remote.sh -i FILE
+
+desk1        desktop
+laptop1      laptop
+me@server1   server
+router1      server   # routers are servers to herd
