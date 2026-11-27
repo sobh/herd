@@ -1,0 +1,327 @@
+#!/bin/sh
+# pre-commit
+#
+# Description:
+#   Format and check staged files before each commit. Formatters only touch
+#   staged files and re-stage them, unless a file is partially staged (hunks),
+#   in which case the commit is rejected instead. Verbose tool output goes to
+#   <git dir>/pre-commit.log.
+#
+#   Checks: portable filenames, trailing whitespace, Markdown format and lint
+#   (rumdl), shell format and lint (shfmt and ShellCheck), and spelling
+#   (typos).
+#
+# Requirements:
+#   POSIX sh, git, sed, grep; rumdl, shfmt, ShellCheck, and typos (a missing
+#   tool skips its check with a warning)
+#
+# Exit codes:
+#   0  All checks passed (or were skipped)
+#   1  At least one check failed; the commit is rejected
+
+# ---- Terminal colors ---------------------------------------------------------
+
+RESET="\033[0m"
+RED="\033[1;31m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[1;34m"
+CYAN="\033[1;36m"
+
+# ---- Setup -------------------------------------------------------------------
+
+passed_checks=""
+failed_checks=""
+skipped_checks=""
+modifications_made=""
+user_actions=""
+final_exit_code=0
+
+# Stored in the git dir so it can never be committed by accident.
+hook_log="$(git rev-parse --git-dir)/pre-commit.log"
+: >"$hook_log"
+
+# Files with unstaged changes before any formatter runs. Such files are never
+# auto-staged, so a partial (hunk) staging is never silently widened.
+unstaged_before_hook=$(git diff --name-only)
+
+# Staged paths that still exist (added, copied, modified, renamed).
+staged_paths=$(git diff --staged --name-only --diff-filter=d)
+
+# Regular files only: file checks must not descend into a submodule.
+staged_files=$(printf '%s\n' "$staged_paths" | while IFS= read -r path; do
+	if [ -f "$path" ]; then
+		printf '%s\n' "$path"
+	fi
+done)
+
+# Split unquoted file lists on newlines only, so paths with spaces stay intact.
+IFS='
+'
+
+# ---- Helpers -----------------------------------------------------------------
+
+# Record a check result.
+# $1: check label (emoji and name); $2: failure detail; $3: required action
+pass() {
+	passed_checks="${passed_checks}\t✅ $1\n"
+}
+fail() {
+	failed_checks="${failed_checks}\t❌ $1: $2\n"
+	user_actions="${user_actions}\t👉 $3\n"
+	final_exit_code=1
+}
+skip() {
+	skipped_checks="${skipped_checks}\t⚠️  $1: $2\n"
+}
+
+# Print staged files whose paths match an extended regular expression.
+# $1: ERE matched against each path
+staged_matching() {
+	printf '%s\n' "$staged_files" | grep -E -- "$1"
+}
+
+# Succeed when a command is available; otherwise record the check as skipped.
+# $1: check label; $2: command name
+require() {
+	if command -v "$2" >/dev/null 2>&1; then
+		return 0
+	fi
+	skip "$1" "'$2' not installed"
+	return 1
+}
+
+# Run a command with its output captured to the log, showing a spinner on a
+# terminal so the hook is never silent. Preserves the command's exit code.
+# $1: label shown while running; remaining arguments: the command
+run_logged() {
+	label=$1
+	shift
+	{
+		printf '\n===== %s =====\n' "$label"
+		# "$*" joins with the first IFS character; use spaces for the log.
+		(
+			IFS=' '
+			printf '$ %s\n\n' "$*"
+		)
+	} >>"$hook_log"
+
+	"$@" >>"$hook_log" 2>&1 &
+	command_pid=$!
+
+	if [ -t 2 ]; then
+		# shellcheck disable=SC1003 # the last frame is a literal backslash
+		spinner='|/-\'
+		index=0
+		start=$(date +%s)
+		while kill -0 "$command_pid" 2>/dev/null; do
+			index=$(((index + 1) % 4))
+			frame=$(printf '%s' "$spinner" | cut -c "$((index + 1))")
+			elapsed=$(($(date +%s) - start))
+			printf '\r\t%s %s... (%ss)' "$frame" "$label" "$elapsed" >&2
+			sleep 0.2
+		done
+		printf '\r\033[K' >&2
+	else
+		printf '\t… %s\n' "$label" >&2
+	fi
+
+	wait "$command_pid"
+}
+
+# Re-stage the given files after a formatter changed them, refusing files
+# that were partially staged before the hook ran.
+# $1: newline-separated file list; $2: description for the summary
+restage_files() {
+	restaged_count=0
+	while IFS= read -r file; do
+		[ -z "$file" ] && continue
+		git diff --quiet -- "$file" && continue
+
+		if printf '%s\n' "$unstaged_before_hook" | grep -Fxq -- "$file"; then
+			fail "Auto-stage" "'$file' is partially staged" \
+				"Stage '$file' fully, or stash unstaged changes ('git stash -k'), then commit again."
+		else
+			git add -- "$file"
+			restaged_count=$((restaged_count + 1))
+		fi
+	done <<EOF
+$1
+EOF
+
+	if [ "$restaged_count" -gt 0 ]; then
+		modifications_made="${modifications_made}\t🛠️  $2\n"
+	fi
+}
+
+# ---- Banner ------------------------------------------------------------------
+
+# Hooks report on stderr so GUI clients show the output.
+exec 1>&2
+
+printf '%b' "$BLUE"
+cat <<'BANNER'
+
+	╔════════════════════════════════════════╗
+	║         🪝 PRE-COMMIT HOOKS 🪝         ║
+	╚════════════════════════════════════════╝
+
+BANNER
+printf '%b' "$RESET"
+
+# ---- Filenames ---------------------------------------------------------------
+
+printf '\n🔎 Checking filenames...\n'
+# Newly added paths: only [A-Za-z0-9._/-], and no segment starting with '-'.
+invalid_names=""
+added_files=$(git diff --staged --name-only --diff-filter=A)
+while IFS= read -r file; do
+	[ -z "$file" ] && continue
+	if printf '%s' "$file" | LC_ALL=C grep -q '[^A-Za-z0-9._/-]'; then
+		invalid_names="${invalid_names}\t   • ${file} (illegal character)\n"
+	elif printf '%s' "$file" | LC_ALL=C grep -q '\(^\|/\)-'; then
+		invalid_names="${invalid_names}\t   • ${file} (segment starts with '-')\n"
+	fi
+done <<EOF
+$added_files
+EOF
+if [ -n "$invalid_names" ]; then
+	fail "🔎 Filenames" "non-portable names\n${invalid_names}" \
+		"Rename files to use only letters, digits, '.', '_', '-'."
+else
+	pass "🔎 Filenames"
+fi
+
+# ---- Trailing whitespace -----------------------------------------------------
+
+printf '\n🧹 Fixing trailing whitespace...\n'
+whitespace_files=$(git diff --check --staged --no-color |
+	sed -n 's/:[0-9]*: trailing whitespace\.$//p' | sort -u)
+if [ -n "$whitespace_files" ]; then
+	printf '%s\n' "$whitespace_files" | while IFS= read -r file; do
+		# Rewrite in place without relying on the non-POSIX `sed -i`.
+		sed 's/[[:space:]]*$//' "$file" >"$file.pre-commit.tmp" &&
+			cat "$file.pre-commit.tmp" >"$file"
+		rm -f "$file.pre-commit.tmp"
+	done
+	restage_files "$whitespace_files" "Stripped trailing whitespace."
+fi
+pass "🧹 Trailing whitespace"
+
+# ---- Markdown format and lint ----------------------------------------------
+
+# rumdl re-wraps (MD013 reflow) and fixes what it can; the rest fails.
+markdown_files=$(staged_matching '\.md$')
+if [ -n "$markdown_files" ] && require "📝 Markdown" rumdl; then
+	printf '\n📝 Formatting and linting Markdown...\n'
+	# shellcheck disable=SC2086 # split intended: one path per line (IFS)
+	if run_logged "rumdl check --fix" rumdl check --fix $markdown_files; then
+		pass "📝 Markdown"
+	else
+		fail "📝 Markdown" "rumdl found issues" \
+			"Fix the remaining rumdl findings (see log)."
+	fi
+	restage_files "$markdown_files" "Formatted Markdown (rumdl)."
+fi
+
+# ---- Shell format and lint ---------------------------------------------------
+
+shell_files=$(staged_matching '(\.sh$|^scripts/githooks/)')
+if [ -n "$shell_files" ]; then
+	printf '\n🐚 Checking shell scripts...\n'
+	if require "🐚 Shell format" shfmt; then
+		# shellcheck disable=SC2086 # split intended: one path per line (IFS)
+		if run_logged "shfmt" shfmt -ln posix -w $shell_files; then
+			restage_files "$shell_files" "Formatted shell scripts (shfmt)."
+			pass "🐚 Shell format"
+		else
+			fail "🐚 Shell format" "shfmt failed" \
+				"Fix the shell syntax errors (see log)."
+		fi
+	fi
+	if require "🐚 Shell lint" shellcheck; then
+		# shellcheck disable=SC2086 # split intended: one path per line (IFS)
+		# -x follows sourced files, such as lib.sh.
+		if run_logged "shellcheck" shellcheck -x -s sh $shell_files; then
+			pass "🐚 Shell lint"
+		else
+			fail "🐚 Shell lint" "shellcheck found issues" \
+				"Fix the shellcheck findings (see log)."
+		fi
+	fi
+fi
+
+# ---- Spelling ----------------------------------------------------------------
+
+# Runs after the formatters so it checks the final content. Check only: typos
+# can auto-correct, but a wrong correction would be committed silently.
+if [ -n "$staged_files" ] && require "🔤 Spelling" typos; then
+	printf '\n🔤 Checking spelling...\n'
+	# --force-exclude applies .typos.toml excludes to explicitly passed paths.
+	# shellcheck disable=SC2086 # split intended: one path per line (IFS)
+	if run_logged "typos" typos --force-exclude -- $staged_files; then
+		pass "🔤 Spelling"
+	else
+		fail "🔤 Spelling" "found typos" \
+			"Fix the typos (see log, or 'typos -w'), or allow words in .typos.toml."
+	fi
+fi
+
+# ---- Summary -----------------------------------------------------------------
+
+if [ "$final_exit_code" -eq 0 ]; then
+	status_color=$GREEN
+else
+	status_color=$RED
+fi
+
+printf '%b' "$status_color"
+cat <<'SUMMARY'
+
+	╔════════════════════════════════════════╗
+	║        📋 PRE-COMMIT SUMMARY 📋        ║
+	╚════════════════════════════════════════╝
+
+SUMMARY
+printf '%b' "$RESET"
+
+if [ "$final_exit_code" -eq 0 ]; then
+	printf '\n%b🚀 All checks passed! 🚀%b\n' "$GREEN" "$RESET"
+	printf '\tYou are cleared to commit 🎉\n'
+fi
+
+if [ -n "$passed_checks" ]; then
+	printf '\n%b PASSED CHECKS 👍%b\n\n' "$GREEN" "$RESET"
+	printf '%b' "$passed_checks"
+fi
+
+if [ -n "$skipped_checks" ]; then
+	printf '\n%b SKIPPED CHECKS 🙈%b\n\n' "$YELLOW" "$RESET"
+	printf '%b' "$skipped_checks"
+fi
+
+if [ -n "$failed_checks" ]; then
+	printf '\n%b⛔ COMMIT REJECTED ⛔%b\n\n' "$RED" "$RESET"
+	printf '\tPlease address the following issues:\n'
+	printf '\n%b FAILED CHECKS 💩%b\n\n' "$RED" "$RESET"
+	printf '%b' "$failed_checks"
+fi
+
+if [ -n "$modifications_made" ]; then
+	printf '\n%b MODIFICATIONS MADE 🤖%b\n\n' "$YELLOW" "$RESET"
+	printf '%b' "$modifications_made"
+fi
+
+if [ -n "$user_actions" ]; then
+	printf '\n%b REQUIRED ACTIONS 🫵%b\n\n' "$CYAN" "$RESET"
+	printf '%b' "$user_actions"
+fi
+
+if [ "$final_exit_code" -ne 0 ]; then
+	printf '\n%b 📄 Full tool output: %s%b\n' "$YELLOW" "$hook_log" "$RESET"
+else
+	printf '\n\t📄 Full tool output logged to %s\n' "$hook_log"
+fi
+
+printf '\n'
+exit "$final_exit_code"

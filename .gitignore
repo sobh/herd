@@ -1,0 +1,5 @@
+# rumdl (Markdown linter) cache
+.rumdl_cache/
+
+# A local inventory, if kept in the repository
+inventory

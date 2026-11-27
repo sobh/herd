@@ -1,0 +1,13 @@
+# typos configuration: https://github.com/crate-ci/typos/blob/master/docs/reference.md
+# typos flags known misspellings only; add false positives below.
+
+[files]
+# Also check dotfiles such as .editorconfig (but not .git/).
+ignore-hidden = false
+extend-exclude = [".git/"]
+
+# Accepted words: "word" = "word"
+[default.extend-words]
+
+# Accepted identifiers (whole names): "NAME" = "NAME"
+[default.extend-identifiers]

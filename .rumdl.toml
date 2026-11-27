@@ -1,0 +1,30 @@
+# rumdl configuration (Markdown linter and formatter): https://rumdl.dev
+# Rule IDs match markdownlint (MD001…).
+
+[global]
+# "standard" covers CommonMark and GitHub Flavored Markdown (GFM callouts).
+flavor = "standard"
+disable = [
+	"MD028", # Blank line inside blockquote: separates GFM callouts
+]
+# Take the line length from .editorconfig (max_line_length).
+editorconfig = true
+# Apply excludes to paths passed explicitly (e.g. by the pre-commit hook).
+force_exclude = true
+
+# List marker style.
+[MD004]
+style = "dash"
+
+# Line length: re-wrap paragraphs, lists, and blockquotes to fill each line.
+# Code blocks and tables are left as written.
+[MD013]
+reflow = true
+reflow-mode = "normalize"
+code-blocks = false
+tables = false
+
+# Table column style: off by default in rumdl, on in markdownlint.
+[MD060]
+enabled = true
+style = "aligned"
